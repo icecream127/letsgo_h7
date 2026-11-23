@@ -28,6 +28,7 @@ setup(
         'gicp_pos_trans = ros2_to_stm32.gicp_trans:main',
             'info_trans = ros2_to_stm32.info_transmiting:main',
             'serial_node = ros2_to_stm32.serial:main',
+            'h7_mini = ros2_to_stm32.h7_mini:main',
             'map_node = ros2_to_stm32.map:main',
             'ui_node = ros2_to_stm32.ui:main',
         ],

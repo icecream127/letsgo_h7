@@ -317,6 +317,25 @@ def test_third_step_matches_original_step_mode_seven(task):
     assert task.pending_jump == (18, 7)
 
 
+def test_mini_reaches_target_at_lidar_position():
+    from ros2_to_stm32.tasktodo_mini import TaskTodoMini
+
+    rclpy.init()
+    node = TaskTodoMini()
+    try:
+        with patch.object(node, 'Kkey_To_Number', return_value=True) as command:
+            node.Quadruped_Obstacle(0.79, 0.0, 0.0)
+            command.assert_called_with('前进')
+            assert node.index == 0
+
+            node.Quadruped_Obstacle(1.0, 0.0, 0.0)
+            command.assert_called_with('站立')
+            assert node.index == 1
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
+
+
 def test_normal_region_dispatches_bridge_a(task):
     task.route_profile = 'zones'
     with patch.object(task, 'handle_bridge_A') as handler:
@@ -347,40 +366,146 @@ def test_ui_position_display_has_one_message_source(task):
         node.destroy_node()
 
 
-def test_calibration_requires_two_valid_points():
+@pytest.fixture
+def odometry_adapter():
     rclpy.init()
     node = TopicRenamer()
+    clock = SimpleNamespace(nanoseconds=10_000_000_000)
+    node.get_clock = lambda: SimpleNamespace(now=lambda: clock)
     positions = []
     ready = []
     node.publisher.publish = lambda message: positions.append(message.data)
     node.calibration_publisher.publish = lambda message: ready.append(message.data)
-    odometry = Odometry()
-    odometry.pose.pose.orientation.w = 1.0
+
+    def send(x=0.0, y=0.0, z=0.0, yaw=0.0, age=0.0, advance=0.1, frame='odom'):
+        clock.nanoseconds += round(advance * 1_000_000_000)
+        stamp_ns = clock.nanoseconds - round(age * 1_000_000_000)
+        odometry = Odometry()
+        odometry.header.stamp.sec, odometry.header.stamp.nanosec = divmod(stamp_ns, 10**9)
+        odometry.header.frame_id = frame
+        odometry.child_frame_id = 'livox_frame'
+        odometry.pose.pose.position.x = x
+        odometry.pose.pose.position.y = y
+        odometry.pose.pose.position.z = z
+        odometry.pose.pose.orientation.z = math.sin(math.radians(yaw) / 2.0)
+        odometry.pose.pose.orientation.w = math.cos(math.radians(yaw) / 2.0)
+        node.Odometry_callback(odometry)
+
+    def capture(point):
+        node.task_param_callback(Float32MultiArray(data=[float(point)]))
+
     try:
-        node.task_param_callback(Float32MultiArray(data=[1.0]))
-        assert not node.first_captured
-        node.Odometry_callback(odometry)
-        assert not positions
-        node.task_param_callback(Float32MultiArray(data=[2.0]))
-        assert not node.second_captured
-        node.task_param_callback(Float32MultiArray(data=[1.0]))
-        node.task_param_callback(Float32MultiArray(data=[2.0]))
-        assert not node.second_captured
-        odometry.pose.pose.position.x = 1.0
-        node.Odometry_callback(odometry)
-        node.task_param_callback(Float32MultiArray(data=[2.0]))
-        node.Odometry_callback(odometry)
-        assert ready[-1]
-        assert positions[-1] == pytest.approx([1.0, 0.0, 0.0])
-        odometry.pose.pose.orientation.z = math.sin(math.pi / 4)
-        odometry.pose.pose.orientation.w = math.cos(math.pi / 4)
-        node.Odometry_callback(odometry)
-        assert positions[-1][2] == pytest.approx(90.0)
-        node.task_param_callback(Float32MultiArray(data=[1.0]))
-        count = len(positions)
-        node.Odometry_callback(odometry)
-        assert not ready[-1]
-        assert len(positions) == count
+        yield send, capture, positions, ready
     finally:
         node.destroy_node()
         rclpy.shutdown()
+
+
+def test_calibration_requires_two_valid_points(odometry_adapter):
+    send, capture, positions, ready = odometry_adapter
+    capture(1)
+    send()
+    assert not positions
+    capture(2)
+    capture(1)
+    capture(2)
+    send(x=0.2)
+    assert not positions
+    capture(2)
+    send(x=0.2, yaw=30.0)
+    assert ready[-1]
+    assert positions[-1] == pytest.approx([0.2, 0.0, 30.0])
+    capture(1)
+    send(x=0.2, yaw=30.0)
+    assert not ready[-1]
+    assert len(positions) == 1
+
+
+@pytest.mark.parametrize('rejected', [
+    {'age': 0.51}, {'age': -0.11}, {'age': 10.3},  # expired, future, zero stamp
+    {'age': 0.1}, {'age': 0.15}, {'age': 0.3},   # duplicate, out of order
+    {'frame': 'map'}, {'y': math.nan},            # incompatible frame, invalid pose
+])
+def test_dropped_odometry_does_not_change_last_pose(odometry_adapter, rejected):
+    send, capture, positions, ready = odometry_adapter
+    send()
+    capture(1)
+    send(x=0.2)
+    capture(2)
+    send(x=0.25)
+    send(x=5.0, **rejected)
+    assert len(positions) == 1
+    assert ready[-1]
+    send(x=0.3)
+    assert positions[-1] == pytest.approx([0.3, 0.0, 0.0])
+    assert len(positions) == 2
+
+
+@pytest.mark.parametrize('discontinuity', [
+    {'x': 0.8}, {'z': -0.6}, {'yaw': 50.0},  # horizontal, vertical, heading jumps
+    {'x': 0.3, 'advance': 1.1},             # long gap at the original location
+])
+def test_odometry_discontinuity_recovers_with_original_ab_points(
+        odometry_adapter, discontinuity):
+    send, capture, positions, ready = odometry_adapter
+    send()
+    capture(1)
+    send(x=0.2)
+    capture(2)
+    send(x=0.25)
+    send(**discontinuity)
+    assert len(positions) == 1
+    assert not ready[-1]
+    # Neither a fresh distant sequence nor a calibration request can replace the anchor.
+    capture(1)
+    for _ in range(15):
+        send(x=1.0)
+    assert len(positions) == 1
+    assert not ready[-1]
+
+    send(x=0.3)
+    assert len(positions) == 1
+    send(x=0.3, age=0.1)  # A duplicate cannot confirm recovery.
+    assert len(positions) == 1
+    send(x=0.35)
+    assert ready[-1]
+    assert positions[-1] == pytest.approx([0.35, 0.0, 0.0])
+    assert len(positions) == 2
+
+
+def test_odometry_long_gap_recovers_in_two_frames(odometry_adapter):
+    send, capture, positions, ready = odometry_adapter
+    send()
+    capture(1)
+    send(x=0.2)
+    capture(2)
+    send(x=0.25)
+    send(x=0.3, advance=1.1)
+    assert len(positions) == 1
+    assert not ready[-1]
+    send(x=0.35)
+    assert ready[-1]
+    assert positions[-1] == pytest.approx([0.35, 0.0, 0.0])
+
+
+def test_yaw_wrap_and_slow_vertical_motion_keep_calibration(odometry_adapter):
+    send, capture, positions, ready = odometry_adapter
+    send(yaw=179.0)
+    capture(1)
+    send(x=0.2, yaw=179.0)
+    capture(2)
+    send(x=0.25, z=0.03, yaw=-179.0)
+    assert ready[-1]
+    assert positions[-1] == pytest.approx([0.25, 0.0, -179.0])
+
+
+def test_stale_measurement_cannot_be_used_to_capture_a(odometry_adapter):
+    send, capture, positions, ready = odometry_adapter
+    send(age=0.49)
+    send(age=0.51, advance=0.02)
+    capture(1)
+    send(x=0.2)
+    capture(2)
+    send(x=0.25)
+    assert not positions
+    assert not ready[-1]

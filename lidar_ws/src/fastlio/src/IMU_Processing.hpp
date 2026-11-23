@@ -49,7 +49,6 @@ class ImuProcess
   Eigen::Matrix<double, 12, 12> Q;
   bool Process(const MeasureGroup &meas, esekfom::esekf<state_ikfom, 12, input_ikfom> &kf_state, PointCloudXYZI &pcl_out);
 
-  ofstream fout_imu;
   V3D cov_acc;
   V3D cov_gyr;
   V3D cov_acc_scale;
@@ -265,8 +264,6 @@ bool ImuProcess::UndistortPcl(const MeasureGroup &meas, esekfom::esekf<state_ikf
                 0.5 * (head->linear_acceleration.y + tail->linear_acceleration.y),
                 0.5 * (head->linear_acceleration.z + tail->linear_acceleration.z);
 
-    // fout_imu << setw(10) << head->header.stamp.toSec() - first_lidar_time << " " << angvel_avr.transpose() << " " << acc_avr.transpose() << endl;
-
     acc_avr     = acc_avr * G_m_s2 / mean_acc.norm(); // - state_inout.ba;
 
     in.acc = acc_avr;
@@ -360,7 +357,6 @@ bool ImuProcess::Process(const MeasureGroup &meas,
       cov_gyr = cov_gyr_scale;
       imu_need_init_ = false;
       std::cout << "IMU Initial Done" << std::endl;
-      fout_imu.open(DEBUG_FILE_DIR("imu.txt"), ios::out);
     }
     return false;
   }

@@ -1,6 +1,6 @@
 """Map-corrected position input for the legacy A/B course controller.
 
-Do not run alongside pos_trans. Body-center correction remains in Task_To_Do.
+Do not run alongside pos_trans. Output uses the LiDAR position in A/B course coordinates.
 """
 import time
 
@@ -33,6 +33,9 @@ class GicpTrans(TopicRenamer):
         self.create_subscription(Bool, '/gicp/valid', self.on_valid, 1)
         self.create_subscription(Odometry, '/Odometry', self.on_odom, 1)
         self.create_timer(0.05, self.update_map_pose)
+
+    def _expected_odom_frames(self):
+        return self.map_frame, self.body_frame
 
     def on_valid(self, msg):
         self.valid = msg.data

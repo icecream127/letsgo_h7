@@ -4,8 +4,8 @@
 
 FAST-LIO 发布 odom→livox_frame；GICP 发布 map→odom。
 新增 gicp_pos_trans 以 20 Hz 查询 map→livox_frame，并沿用原 trans.py 的 A/B
-赛道转换，发布 /pos_trans。info_trans（或 mini）原有 yaw 取负和 0.21 m
-身体中心补偿仍只执行一次。没有更改电控协议、GICP 算法及原有路线。
+赛道转换，发布 /pos_trans。info_trans 和 MINI 直接使用雷达在赛道内的
+位置，并沿用 yaw 取负的约定。
 
 不是直接订阅约 1 Hz 的 /gicp/pose：使用 TF 链得到连续位姿，同时检查
 /gicp/valid、/Odometry 和 TF 时效。失效时停发 /pos_trans，现有串口节点
@@ -34,7 +34,7 @@ bash run/gicp_pos_trans.sh
 赛道的关系；旧路线点仍是赛道坐标，不是 PCD/map 坐标。停止或重启本适配器
 后需要重新采 A/B。重新设置 GICP 初始位姿前先解除电控使能，检查对齐并重采。
 
-先在不使能电机时启动原 UI/串口并核对 /pos_trans、坐标轴方向和身体中心补偿。
+先在不使能电机时启动原 UI/串口并核对 /pos_trans、坐标轴方向和雷达在赛道中的位置。
 确认后只启动一个 info_trans 或 tasktodo_mini 控制器。原来的区域位置必须对应
 当前 A/B 赛道，不能把别的赛场旧路线直接用于这张房间 PCD。
 

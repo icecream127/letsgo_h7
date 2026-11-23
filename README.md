@@ -1,4 +1,41 @@
-# letsgo：完整上位机独立源码包
+# letsgo_h7
+
+Jetson Nano 部署见[原生部署说明](run/JETSON_NANO.md)。已有 ROS 2 Humble
+环境时，在项目目录中运行 `bash run/nano.sh build` 即可编译；`bash run/nano.sh run`
+启动无界面的 H7 MINI，由 `bash run/nano.sh arm` 单独启用。
+
+本副本使用 H743 USART3 PC Link。板端为 115200 / 8N1，无流控。H743 固件需启用
+`HORSE_ENABLE_PC_LINK=1`。接线依据见 H743 固件的 README 中「USART3 小电脑动作控制」。
+
+先单独查询一次状态，按电脑实际设备名指定端口。
+
+```bash
+bash run/h7_mini.sh --status --port /dev/ttyUSB0
+```
+
+启动定位和里程计过滤，再启动 H743 MINI。H743 MINI 使用过滤后的 `/Odometry/verified`。
+
+```bash
+bash run/lio_driver.sh   # 终端一
+bash run/pos_trans.sh    # 终端二
+```
+
+状态查询结束后，在第三个终端启动 H743 MINI。
+
+```bash
+bash run/h7_mini.sh --ros-args -p port:=/dev/ttyUSB0
+```
+
+将马头朝向要走的方向，等定位稳定、板端进入 READY 或 RUN，再执行 `bash run/arm.sh`。
+MINI 会记录雷达当前位置与航向，目标在正前方 1 m，无需 A/B 踩点。READY 下启动 TROT
+会请求板端预检和起立。
+
+`bash run/pause.sh` 请求本会话收步。重新启用会接着走向原目标。
+要从新位置再走 1 m，停稳后执行 `bash run/reset_route.sh`，再启用。
+遥控 KEY7 可执行板端停机。旧版 `serial.sh`、`info_trans.sh` 和 `start.sh` 面向原电控。
+
+以下是原 MINI 项目的历史说明。
+
 
 ## 2026-10-26 电控配套版（以下历史说明以本节为准）
 

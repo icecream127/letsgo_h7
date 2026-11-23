@@ -1,13 +1,45 @@
-# 导入ROS2相关库
-import rclpy
-from rclpy.node import Node
-from nav_msgs.msg import Odometry 
-from geometry_msgs.msg import TransformStamped
 import math
 import time
-from std_msgs.msg import Bool
-from std_msgs.msg import Float32MultiArray
-from .zone_manager import ZoneManager, zone_config_path 
+from typing import NamedTuple
+
+import rclpy
+from nav_msgs.msg import Odometry
+from rclpy.executors import ExternalShutdownException
+from rclpy.node import Node
+from std_msgs.msg import Bool, Float32MultiArray
+
+from .zone_manager import ZoneManager, zone_config_path
+
+
+VERIFIED_ODOMETRY_TOPIC = '/Odometry/verified'
+
+
+class AcceptedOdometry(NamedTuple):
+    stamp_ns: int
+    position: tuple[float, float, float]
+    yaw: float
+
+
+def read_odometry(message):
+    pose = message.pose.pose
+    position = (pose.position.x, pose.position.y, pose.position.z)
+    rotation = (pose.orientation.x, pose.orientation.y, pose.orientation.z, pose.orientation.w)
+    if not all(math.isfinite(value) for value in (*position, *rotation)):
+        return None
+    norm = math.hypot(*rotation)
+    if not math.isfinite(norm) or norm < 1e-6:
+        return None
+    x, y, z, w = (value / norm for value in rotation)
+    yaw = math.atan2(2.0 * (w*z + x*y), 1.0 - 2.0 * (y*y + z*z))
+    stamp = message.header.stamp
+    return AcceptedOdometry(stamp.sec * 1_000_000_000 + stamp.nanosec, position, yaw)
+
+
+def fresh_stamp(stamp_ns, now_ns, max_age, future_tolerance):
+    age = (now_ns - stamp_ns) / 1_000_000_000
+    return stamp_ns > 0 and -future_tolerance <= age <= max_age
+
+
 class TopicRenamer(Node):
     def __init__(self):
         super().__init__('topic_trans_node')
@@ -23,6 +55,18 @@ class TopicRenamer(Node):
         self.first_captured = False
         self.second_captured = False
         self.last_odometry_time = float('-inf')
+        self._last_odometry = None
+        self._recovering = False
+        self._recovery_sample = None
+        self.odom_max_age = self._odom_parameter('odom_max_age', 0.5)
+        self.odom_future_tolerance = self._odom_parameter('odom_future_tolerance', 0.1)
+        self.odom_reset_threshold = self._odom_parameter('odom_reset_threshold', 0.1)
+        self.odom_max_gap = self._odom_parameter('odom_max_gap', 1.0)
+        self.odom_jump_distance = self._odom_parameter('odom_jump_distance', 0.5)
+        self.odom_jump_speed = self._odom_parameter('odom_jump_speed', 3.0)
+        self.odom_jump_yaw = math.radians(self._odom_parameter('odom_jump_yaw_deg', 45.0))
+        self.odom_jump_yaw_rate = math.radians(
+            self._odom_parameter('odom_jump_yaw_rate_deg_s', 180.0))
         self.calibration_publisher = self.create_publisher(Bool, '/calibration_ready', 1)
 
         self.zm = ZoneManager(zone_config_path())
@@ -39,6 +83,7 @@ class TopicRenamer(Node):
             10  
         )
 
+        self.verified_pose_publisher = self.create_publisher(Odometry, VERIFIED_ODOMETRY_TOPIC, 1)
         self.publisher = self.create_publisher(Float32MultiArray, '/pos_trans', 20)
     def update_zone_data(self, zone_name, new_x, new_y):
         """
@@ -57,14 +102,19 @@ class TopicRenamer(Node):
     def task_param_callback(self, msg):
         if not msg.data:
             return
-        if msg.data[0] in (1.0, 2.0) and time.monotonic() - self.last_odometry_time > 1.0:
+        if msg.data[0] in (1.0, 2.0) and (
+            self._last_odometry is None
+            or time.monotonic() - self.last_odometry_time > self.odom_max_age
+            or not self._fresh_stamp(self._last_odometry.stamp_ns)
+        ):
             self.get_logger().error('没有新鲜里程计，拒绝踩点')
             return
         if msg.data[0] == 1.0:
-           self.x1 = self.x_p
-           self.y1 = self.y_p
-           self.first_captured = True
-           self.second_captured = False
+            self.x1 = self.x_p
+            self.y1 = self.y_p
+            self.first_captured = True
+            self.second_captured = False
+            self.calibration_publisher.publish(Bool(data=False))
         elif msg.data[0] == 2.0:
             if not self.first_captured:
                 self.get_logger().error('请先采 A 点')
@@ -90,46 +140,99 @@ class TopicRenamer(Node):
             self.update_zone_data("高墙",self.x_trans,self.y_trans)
         elif msg.data[0] == 10.0:
             self.update_zone_data("台阶",self.x_trans,self.y_trans)
-    def trans_pos(self, trans, pos_msg):
-        trans.header.frame_id = "lidar_init"
-        trans.header.stamp = pos_msg.header.stamp
-        trans.child_frame_id = "body"
-        
-        trans.transform.translation.x = pos_msg.pose.pose.position.x
-        trans.transform.translation.y = pos_msg.pose.pose.position.y
-        trans.transform.translation.z = pos_msg.pose.pose.position.z
-        
-        trans.transform.rotation.x = pos_msg.pose.pose.orientation.x
-        trans.transform.rotation.y = pos_msg.pose.pose.orientation.y
-        trans.transform.rotation.z = pos_msg.pose.pose.orientation.z
-        trans.transform.rotation.w = pos_msg.pose.pose.orientation.w
+
+    def _odom_parameter(self, name, default):
+        value = self.declare_parameter(name, default).value
+        if not math.isfinite(value) or value <= 0.0:
+            raise ValueError(f'{name} must be finite and positive')
+        return value
+
+    def _expected_odom_frames(self):
+        return 'odom', 'livox_frame'
+
+    def _fresh_stamp(self, stamp_ns):
+        return fresh_stamp(stamp_ns, self.get_clock().now().nanoseconds,
+                           self.odom_max_age, self.odom_future_tolerance)
+
+    @staticmethod
+    def _pose_change(previous, current):
+        distance = math.dist(previous.position, current.position)
+        turn = abs(math.remainder(current.yaw - previous.yaw, math.tau))
+        return distance, turn
+
+    def _exceeds_jump_limit(self, distance, turn, elapsed):
+        return (distance > max(self.odom_jump_distance, self.odom_jump_speed * elapsed)
+                or turn > max(self.odom_jump_yaw, self.odom_jump_yaw_rate * elapsed))
+
+    def _begin_recovery(self, reason):
+        # Keep the last trusted pose in the estimator frame as the recovery anchor.
+        self._recovering = True
+        self._recovery_sample = None
+        self.last_odometry_time = float('-inf')
+        self.calibration_publisher.publish(Bool(data=False))
+        self.get_logger().warning(f'{reason}，等待位姿恢复连续')
+
+    def _recovery_confirmed(self, current, distance, turn):
+        # Do not grow the recovery envelope with the length of the outage.
+        if distance > self.odom_jump_distance or turn > self.odom_jump_yaw:
+            self._recovery_sample = None
+            return False
+
+        candidate = self._recovery_sample
+        if candidate is not None and current.stamp_ns <= candidate.stamp_ns:
+            return False
+        self._recovery_sample = current
+        if candidate is None or not self._fresh_stamp(candidate.stamp_ns):
+            return False
+
+        elapsed = (current.stamp_ns - candidate.stamp_ns) / 1_000_000_000
+        distance, turn = self._pose_change(candidate, current)
+        if self._exceeds_jump_limit(distance, turn, elapsed):
+            return False
+        self._recovering = False
+        self._recovery_sample = None
+        self.get_logger().info('里程计连续性已恢复')
+        return True
 
     def Odometry_callback(self, pos_msg):
-        position = pos_msg.pose.pose.position
-        orientation = pos_msg.pose.pose.orientation
-        values = (position.x, position.y, position.z, orientation.x, orientation.y, orientation.z, orientation.w)
-        if not all(math.isfinite(value) for value in values):
+        if (pos_msg.header.frame_id, pos_msg.child_frame_id) != self._expected_odom_frames():
+            self.get_logger().warning('丢弃坐标系不符的里程计', throttle_duration_sec=5.0)
             return
-        if sum(value * value for value in values[3:]) < 1e-12:
+
+        current = read_odometry(pos_msg)
+        if current is None:
             return
+        if not self._fresh_stamp(current.stamp_ns):
+            self.get_logger().warning('丢弃缺少有效时间戳、过期或超前的里程计', throttle_duration_sec=5.0)
+            return
+
+        previous = self._last_odometry
+        if previous is not None:
+            elapsed = (current.stamp_ns - previous.stamp_ns) / 1_000_000_000
+            if elapsed <= 0.0:
+                if elapsed < -self.odom_reset_threshold:
+                    self.get_logger().warning(
+                        f'丢弃时间戳倒退 {-elapsed:.3f} s 的里程计',
+                        throttle_duration_sec=5.0)
+                return
+
+            distance, turn = self._pose_change(previous, current)
+            if not self._recovering:
+                if elapsed > self.odom_max_gap:
+                    self._begin_recovery(f'里程计中断 {elapsed:.3f} s')
+                elif self._exceeds_jump_limit(distance, turn, elapsed):
+                    self._begin_recovery(
+                        f'里程计跳变 {distance:.3f} m / {math.degrees(turn):.1f}°'
+                        f'（{elapsed:.3f} s）')
+                    return
+            if self._recovering and not self._recovery_confirmed(current, distance, turn):
+                return
+
+        self._last_odometry = current
         self.last_odometry_time = time.monotonic()
-        trans = TransformStamped()
-        self.trans_pos(trans, pos_msg)
-        trans_p = trans.transform.translation
-        trans_o = trans.transform.rotation
-
-        self.x_p = trans_p.x
-        self.y_p = trans_p.y
-        self.z_p = trans_p.z
-
-        x_o = trans_o.x
-        y_o = trans_o.y
-        z_o = trans_o.z
-        w_o = trans_o.w
-
-        norm_squared = x_o * x_o + y_o * y_o + z_o * z_o + w_o * w_o
-        yaw = math.atan2(2.0 * (w_o * z_o + x_o * y_o),
-                         norm_squared - 2.0 * (y_o * y_o + z_o * z_o))
+        self.x_p, self.y_p, self.z_p = current.position
+        self.verified_pose_publisher.publish(pos_msg)
+        yaw = current.yaw
         ready = self.first_captured and self.second_captured
         self.calibration_publisher.publish(Bool(data=ready))
         if not ready:
@@ -166,11 +269,12 @@ def main(args=None):
     node = TopicRenamer()
     try:
         rclpy.spin(node)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, ExternalShutdownException):
         pass
     finally:
         node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__ == '__main__':

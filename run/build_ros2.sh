@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -eo pipefail
 if [[ "${PROJECT_CLEAN_ENV:-0}" != 1 ]]; then
-    exec env -i HOME="$HOME" USER="${USER:-user}" PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin LANG=C.UTF-8 PROJECT_CLEAN_ENV=1 BUILD_JOBS="${BUILD_JOBS:-2}" bash "$0" "$@"
+    exec env -i HOME="$HOME" USER="${USER:-user}" PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin LANG=C.UTF-8 PROJECT_CLEAN_ENV=1 BUILD_JOBS="${BUILD_JOBS:-2}" BUILD_PROFILE="${BUILD_PROFILE:-full}" bash "$0" "$@"
 fi
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
@@ -14,4 +14,10 @@ export CMAKE_PREFIX_PATH="$PROJECT_ROOT/.local:${CMAKE_PREFIX_PATH:-}"
 export LD_LIBRARY_PATH="$PROJECT_ROOT/.local/lib:${LD_LIBRARY_PATH:-}"
 export CMAKE_BUILD_PARALLEL_LEVEL="${BUILD_JOBS:-2}"
 cd "$PROJECT_ROOT/lidar_ws"
-colcon build --base-paths src --packages-up-to ros2_to_stm32 go2_real_localization --executor sequential --symlink-install --cmake-args -DROS_EDITION=ROS2 -DDISTRO_ROS=humble -DBUILD_TESTING=OFF -DBUILD_apps=OFF -DBUILD_VGICP_CUDA=OFF "-DLIVOX_LIDAR_SDK_LIBRARY=$PROJECT_ROOT/.local/lib/liblivox_lidar_sdk_shared.so" "-DLIVOX_LIDAR_SDK_INCLUDE_DIR=$PROJECT_ROOT/.local/include"
+packages=(ros2_to_stm32)
+case "${BUILD_PROFILE:-full}" in
+    full) packages+=(go2_real_localization) ;;
+    mini) ;;
+    *) echo "BUILD_PROFILE 必须为 full 或 mini" >&2; exit 2 ;;
+esac
+colcon build --base-paths src --packages-up-to "${packages[@]}" --executor sequential --symlink-install --cmake-args -DROS_EDITION=ROS2 -DDISTRO_ROS=humble -DBUILD_TESTING=OFF -DBUILD_apps=OFF -DBUILD_VGICP_CUDA=OFF "-DLIVOX_LIDAR_SDK_LIBRARY=$PROJECT_ROOT/.local/lib/liblivox_lidar_sdk_shared.so" "-DLIVOX_LIDAR_SDK_INCLUDE_DIR=$PROJECT_ROOT/.local/include"
