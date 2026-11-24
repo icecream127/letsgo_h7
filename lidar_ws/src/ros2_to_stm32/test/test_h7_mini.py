@@ -1,3 +1,4 @@
+import json
 import math
 import os
 import pty
@@ -133,6 +134,45 @@ def test_h7_uses_current_position_and_heading_without_ab(h7):
     assert node.reached and not node.armed and node.board.phase == 3
     node.tick()
     assert board.received.count(b'T1') == 1
+
+
+def test_h7_reaches_target_with_small_lateral_offset(h7):
+    node, board = h7
+    states = []
+    node.state_pub.publish = lambda msg: states.append(json.loads(msg.data))
+    node.tick()
+    pose(node, 0.0)
+    assert enable(node)
+    node.tick()
+
+    pose(node, 0.8, y=0.03)
+    node.tick()
+    assert b'Z1' not in board.received
+    assert states[-1]['route'] == pytest.approx(dict(
+        forward_m=0.8, remaining_m=0.2, cross_track_m=0.03, heading_error_deg=0.0))
+
+    pose(node, 1.0, y=0.03)
+    node.tick()
+    assert board.received.count(b'Z1') == 1
+    assert node.reached and states[-1]['reason'] == '到达目标'
+
+
+@pytest.mark.parametrize(('x', 'y', 'reason'), [
+    (0.6, 0.06, '偏离起始直线'),
+    (1.08, 0.0, '已越过目标线'),
+])
+def test_h7_stops_outside_the_straight_route(h7, x, y, reason):
+    node, board = h7
+    node.tick()
+    pose(node, 0.0)
+    assert enable(node)
+    node.tick()
+
+    pose(node, x, y=y)
+    node.tick()
+    assert board.received.count(b'Z1') == 1
+    assert not node.armed and not node.reached
+    assert reason in node.reason
 
 
 def test_h7_resume_preserves_target_until_route_reset(h7):

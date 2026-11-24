@@ -59,6 +59,9 @@ bash run/nano.sh arm
 ```
 
 首次启用使用当时的雷达位姿，目标在正前方 1 m。无需 A/B 踩点。
+MINI 按起始直线检查航向与横向偏差，进入目标 5 cm 范围时请求收步。
+`/motor_state` 的 `route` 字段显示沿线进度、剩余距离、横向偏差和航向误差，
+`reason` 显示收步或拒绝启用的原因。
 `bash run/nano.sh pause` 请求收步，再次启用会继续走向原目标。停稳后运行
 `bash run/nano.sh reset_route`，下一次启用才会从当前位置重新计 1 m。
 遥控 KEY7 执行板端停机。前台启动终端按 Ctrl+C 退出。

@@ -4,6 +4,7 @@ import json
 import math
 import sys
 import time
+from typing import NamedTuple
 
 import rclpy
 from nav_msgs.msg import Odometry
@@ -28,17 +29,33 @@ POSE_TIMEOUT = 0.5
 AT_TARGET = "到达目标"
 
 
-def route_decision(pose, target):
+class RouteProgress(NamedTuple):
+    remaining_m: float
+    cross_track_m: float
+    heading_error_rad: float
+
+
+def route_progress(pose, target):
     x, y, _ = pose.position
-    remaining_x = target[0] - x
-    remaining_y = target[1] - y
-    if math.hypot(remaining_x, remaining_y) <= POSITION_TOLERANCE:
+    remaining_x, remaining_y = target[0] - x, target[1] - y
+    cos_yaw, sin_yaw = math.cos(target[2]), math.sin(target[2])
+    return RouteProgress(
+        remaining_x * cos_yaw + remaining_y * sin_yaw,
+        remaining_x * sin_yaw - remaining_y * cos_yaw,
+        math.remainder(pose.yaw - target[2], math.tau),
+    )
+
+
+def route_decision(pose, target):
+    remaining, cross_track, heading_error = route_progress(pose, target)
+    if math.hypot(remaining, cross_track) <= POSITION_TOLERANCE:
         return AT_TARGET
-    remaining_forward = remaining_x * math.cos(target[2]) + remaining_y * math.sin(target[2])
-    bearing = math.atan2(remaining_y, remaining_x)
-    if (remaining_forward <= 0
-            or abs(math.remainder(bearing - pose.yaw, math.tau)) >= HEADING_TOLERANCE):
-        return '请用遥控器对准目标，H743 PC Link 仅支持直行'
+    if remaining <= 0:
+        return '已越过目标线，超出到点范围'
+    if abs(cross_track) > POSITION_TOLERANCE:
+        return '偏离起始直线超过 5 cm，请用遥控器调整位置'
+    if abs(heading_error) >= HEADING_TOLERANCE:
+        return '航向偏离起始直线，请用遥控器调整朝向'
     return None
 
 
@@ -181,6 +198,15 @@ class H7Mini(Node):
                      phase=board.phase if board else None,
                      state=board.state if board else None,
                      fault=board.fault if board else None)
+        if self.pose is not None:
+            state['pose_age_s'] = round(
+                (self.get_clock().now().nanoseconds - self.pose.stamp_ns) / 1e9, 3)
+        if self.target is not None and self.pose is not None:
+            progress = route_progress(self.pose, self.target)
+            state['route'] = dict(forward_m=round(TRAVEL_DISTANCE - progress.remaining_m, 3),
+                                  remaining_m=round(progress.remaining_m, 3),
+                                  cross_track_m=round(progress.cross_track_m, 3),
+                                  heading_error_deg=round(math.degrees(progress.heading_error_rad), 1))
         self.state_pub.publish(String(data=json.dumps(state, ensure_ascii=False)))
 
     def destroy_node(self):
