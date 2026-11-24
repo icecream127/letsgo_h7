@@ -23,7 +23,8 @@ WALKING = 2
 STOPPING = 8
 SESSION_LOST = (4, 5, 6, 7)  # PREEMPTED, TIMEOUT, FAULT, DENIED
 TRAVEL_DISTANCE = 1.0
-POSITION_TOLERANCE = 0.05
+FORWARD_TOLERANCE = 0.05
+CROSS_TRACK_LIMIT = 0.10
 HEADING_TOLERANCE = math.radians(8.0)
 POSE_TIMEOUT = 0.5
 AT_TARGET = "到达目标"
@@ -48,12 +49,12 @@ def route_progress(pose, target):
 
 def route_decision(pose, target):
     remaining, cross_track, heading_error = route_progress(pose, target)
-    if math.hypot(remaining, cross_track) <= POSITION_TOLERANCE:
-        return AT_TARGET
-    if remaining <= 0:
+    if abs(cross_track) > CROSS_TRACK_LIMIT:
+        return '偏离起始直线超过 10 cm，请用遥控器调整位置'
+    if remaining < -FORWARD_TOLERANCE:
         return '已越过目标线，超出到点范围'
-    if abs(cross_track) > POSITION_TOLERANCE:
-        return '偏离起始直线超过 5 cm，请用遥控器调整位置'
+    if remaining <= FORWARD_TOLERANCE:
+        return AT_TARGET
     if abs(heading_error) >= HEADING_TOLERANCE:
         return '航向偏离起始直线，请用遥控器调整朝向'
     return None

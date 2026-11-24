@@ -157,8 +157,25 @@ def test_h7_reaches_target_with_small_lateral_offset(h7):
     assert node.reached and states[-1]['reason'] == '到达目标'
 
 
+def test_h7_keeps_moving_at_reported_lateral_offset(h7):
+    node, board = h7
+    node.tick()
+    pose(node, 0.0)
+    assert enable(node)
+    node.tick()
+
+    pose(node, 0.582, -5.0, y=-0.051)
+    node.tick()
+    assert node.armed and b'Z1' not in board.received
+
+    pose(node, 0.96, -5.0, y=-0.088)
+    node.tick()
+    assert node.reached and not node.armed
+    assert board.received.count(b'Z1') == 1
+
+
 @pytest.mark.parametrize(('x', 'y', 'reason'), [
-    (0.6, 0.06, '偏离起始直线'),
+    (0.6, 0.11, '偏离起始直线超过 10 cm'),
     (1.08, 0.0, '已越过目标线'),
 ])
 def test_h7_stops_outside_the_straight_route(h7, x, y, reason):
